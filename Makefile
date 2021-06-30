@@ -1,28 +1,24 @@
-default: pdi
+TARGET = rpipdi
+SRC = $(wildcard src/*.c) $(wildcard src/*.cc)
+OBJ := $(patsubst src/%.c,build/%.o,$(SRC))
+OBJ := $(patsubst src/%.cc,build/%.o,$(OBJ))
 
-OBJS=$(addprefix objs/, \
-  main.o \
-  pdi.o \
-  nvm.o \
-  ihex.o \
-  errinfo.o \
-)
+CFLAGS += -MD -MP -MT $@ -MF build/dep/$(@F).d
+CFLAGS += -O3 -g -Wall -Werror -Isrc -std=c99
+CFLAGS += -D_POSIX_C_SOURCE=200112L -D_XOPEN_SOURCE=500
 
-VPATH=src
+all: $(TARGET)
 
-objs/%.o: %.c
+build/%.o: src/%.c
 	$(CC) $(CFLAGS) $< -c -o $@
 
-objs/%.o: %.cc
-	$(CXX) $(CXXFLAGS) $< -c -o $@
+$(TARGET): $(OBJ)
+	$(CXX) $(OBJ) -o $@
 
-CFLAGS+=-O3 -g -std=c99 -Wall -Wextra -Isrc
-CXXFLAGS+=-O3 -g -std=c++0x -Wall -Wextra -Isrc
-LDFLAGS+=-lbcm2835
-
-pdi: $(OBJS)
-	$(CXX) $(OBJS) $(LDFLAGS) -o $@
-
-.PHONY: clean
 clean:
-	-rm -f pdi objs/*.o
+	rm -rf $(TARGET) build
+
+.PHONY: all clean
+
+# Dependencies
+-include $(shell mkdir -p build/dep) $(wildcard build/dep/*)

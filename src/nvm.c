@@ -1,232 +1,272 @@
-/* Copyright (C) 2015 DiUS Computing Pty. Ltd.
+/*
+  Copyright (C) 2021 Buildbotics LLC.
+  Copyright (C) 2015 DiUS Computing Pty. Ltd.
 
-   This program is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License as published by
-   the Free Software Foundation; either version 2 of the License, or
-   (at your option) any later version.
+  This program is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2 of the License, or
+  (at your option) any later version.
 */
 
 #include "nvm.h"
 #include "pdi.h"
-
-#define PAGE_SIZE 512
-#define WAIT_ATTEMPTS 2000
-
-enum {
-  NVM_NOP                           = 0x00,
-  NVM_CHIP_ERASE                    = 0x40, // cmdex
-  NVM_READ                          = 0x43, // pdi read
-
-  NVM_LOAD_PAGE_BUF                 = 0x23, // pdi write
-  NVM_ERASE_PAGE_BUF                = 0x26, // cmdex
-
-  NVM_ERASE_FLASH_PAGE              = 0x2B, // pdi write
-  NVM_WRITE_FLASH_PAGE              = 0x2E, // pdi write
-  NVM_ERASE_WRITE_FLASH_PAGE        = 0x2F, // pdi write
-  NVM_FLASH_CRC                     = 0x78, // cmdex
-
-  NVM_ERASE_APP_SECTION             = 0x20, // pdi write
-  NVM_ERASE_APP_SECTION_PAGE        = 0x22, // pdi write
-  NVM_WRITE_APP_SECTION_PAGE        = 0x24, // pdi write
-  NVM_ERASE_WRITE_APP_SECTION_PAGE  = 0x25, // pdi write
-  NVM_APP_SECTION_CRC               = 0x38, // cmdex
-
-  NVM_ERASE_BOOT_SECTION            = 0x68, // pdi write
-  NVM_ERASE_BOOT_SECTION_PAGE       = 0x2A, // pdi write
-  NVM_WRITE_BOOT_SECTION_PAGE       = 0x2C, // pdi write
-  NVM_ERASE_WRITE_BOOT_SECTION_PAGE = 0x2D, // pdi write
-  NVM_BOOT_SECTION_CRC              = 0x39, // nvmaa???
-
-  NVM_READ_USERSIG_ROW              = 0x03, // pdi read
-  NVM_ERASE_USERSIG_ROW             = 0x18, // pdi write
-  NVM_WRITE_USERSIG_ROW             = 0x1A, // pdi write
-  NVM_READ_CALIBRATION_ROW          = 0x02, // pdi read
-
-  NVM_READ_FUSE                     = 0x07, // pdi read
-  NVM_WRITE_FUSE                    = 0x4C, // pdi write
-  NVM_WRITE_LOCK_BITS               = 0x08, // cmdex
-
-  NVM_LOAD_EEPROM_PAGE_BUF          = 0x33, // pdi write
-  NVM_ERASE_EEPROM_PAGE_BUF         = 0x36, // cmdex
-
-  NVM_ERASE_EEPROM                  = 0x30, // cmdex
-  NVM_ERASE_EEPROM_PAGE             = 0x32, // pdi write
-  NVM_WRITE_EEPROM_PAGE             = 0x34, // pdi write
-  NVM_ERASE_WRITE_EEPROM_PAGE       = 0x35, // pdi write
-  NVM_READ_EEPROM                   = 0x06  // pdi read
-};
-
-#define NVM_REG_BASE    0x010001C0
-#define NVM_REG_CMD_OFFS      0x0A
-#define NVM_REG_CTRLA_OFFS    0x0B
-#define NVM_REG_STATUS_OFFS   0x0F
-#define NVM_REG_LOCKBITS_OFFS 0x10
-
-#define NVM_CTRLA_CMDEX_bm (1 << 0)
-#define NVM_STATUS_BUSY_bm (1 << 7)
-
-#define PDI_NVMEN_bm 0x02
+#include "devices.h"
 
 
+#define _RETRY_LOOP(OP) do {                    \
+    for (int i = 0; i < MAX_RETRY; i++) {       \
+      if (OP) return true;                      \
+      pdi_open();                               \
+    }                                           \
+    return false;                               \
+  } while (0)
 
-// --- Helper functions --------------------------------------------
 
-static inline bool nvm_cmdex (void)
-{
-  static const char cmds[] = {
-    STS | (SZ_4 << 2) | SZ_1,
-    ((NVM_REG_BASE + NVM_REG_CTRLA_OFFS)      ) & 0xff,
-    ((NVM_REG_BASE + NVM_REG_CTRLA_OFFS) >>  8) & 0xff,
-    ((NVM_REG_BASE + NVM_REG_CTRLA_OFFS) >> 16) & 0xff,
-    ((NVM_REG_BASE + NVM_REG_CTRLA_OFFS) >> 24) & 0xff,
-    NVM_CTRLA_CMDEX_bm
-  };
-  return pdi_send (cmds, sizeof (cmds));
+static bool _store_byte(uint32_t addr, uint8_t value) {
+  uint8_t cmds[] =
+    {STS | SZ_4 << 2 | SZ_1, addr, addr >> 8, addr >> 16, addr >> 24, value};
+  return pdi_send(cmds, sizeof(cmds));
 }
 
 
-static inline bool nvm_loadcmd (uint8_t cmd)
-{
-  char cmds[] = {
-    STS | (SZ_4 << 2) | SZ_1,
-    ((NVM_REG_BASE + NVM_REG_CMD_OFFS)      ) & 0xff,
-    ((NVM_REG_BASE + NVM_REG_CMD_OFFS) >>  8) & 0xff,
-    ((NVM_REG_BASE + NVM_REG_CMD_OFFS) >> 16) & 0xff,
-    ((NVM_REG_BASE + NVM_REG_CMD_OFFS) >> 24) & 0xff,
-    cmd
-  };
-  return pdi_send (cmds, sizeof (cmds));
+static bool _load_u24(uint32_t addr, uint8_t *value) {
+  uint8_t cmds[] =
+    {LDS | SZ_4 << 2 | SZ_3, addr, addr >> 8, addr >> 16, addr >> 24};
+
+  return pdi_send(cmds, sizeof(cmds)) && pdi_recv(value, 3);
 }
 
 
-static inline bool nvm_controller_busy_wait (void)
-{
-  static const char cmds[] = {
-    ST | PTR | SZ_4,
-    ((NVM_REG_BASE + NVM_REG_STATUS_OFFS)      ) & 0xff,
-    ((NVM_REG_BASE + NVM_REG_STATUS_OFFS) >>  8) & 0xff,
-    ((NVM_REG_BASE + NVM_REG_STATUS_OFFS) >> 16) & 0xff,
-    ((NVM_REG_BASE + NVM_REG_STATUS_OFFS) >> 24) & 0xff
-  };
-
-  if (!pdi_send (cmds, sizeof (cmds)))
-    return false;
-
-  const char status_cmd = LD | xPTR | SZ_1;
-  char status = 0;
-  int max_attempts = WAIT_ATTEMPTS;
-  do
-  {
-    if (!pdi_sendrecv (&status_cmd, 1, &status, 1))
-      return false;
-    if (--max_attempts == 0)
-      return false;
-  } while (status & NVM_STATUS_BUSY_bm);
-
-  return true;
+static bool _ldcs(uint8_t reg, uint8_t *value) {
+  uint8_t cmd = LDCS | reg;
+  return pdi_send(&cmd, 1) && pdi_recv(value, 1);
 }
 
 
-// --- API functions -----------------------------------------------
+static bool _store_address(uint32_t addr) {
+  uint8_t cmds[] = {ST | PTR | SZ_4, addr, addr >> 8, addr >> 16, addr >> 24};
+  return pdi_send(cmds, sizeof(cmds));
+}
 
-bool nvm_wait_enabled (void)
-{
-  const char read_status = LDCS | PDI_REG_STATUS;
-  char status = 0x00;
-  int max_attempts = WAIT_ATTEMPTS;
-  while (!(status & PDI_NVMEN_bm))
-  {
-    if (--max_attempts == 0)
-      return false;
-    if (!pdi_sendrecv (&read_status, 1, &status, 1))
-      return false;
+
+static bool _store_repeat(uint32_t count) {
+  uint8_t cmds[] = {REPEAT | SZ_4, count, count >> 8, count >> 16, count >> 24};
+  return pdi_send(cmds, sizeof(cmds));
+}
+
+
+static bool nvm_execute() {
+  return _store_byte(NVM_REG_BASE + NVM_REG_CTRLA_OFFS, NVM_CTRLA_CMDEX_bm);
+}
+
+
+static bool nvm_command(uint8_t cmd) {
+  return _store_byte(NVM_REG_BASE + NVM_REG_CMD_OFFS, cmd);
+}
+
+
+static bool _wait_busy() {
+  if (!_store_address(NVM_REG_BASE + NVM_REG_STATUS_OFFS)) return false;
+
+  uint8_t cmd    = LD | xPTR | SZ_1;
+  uint8_t status = 0;
+
+  for (int i = 0; i < WAIT_ATTEMPTS; i++) {
+    if (!pdi_send(&cmd, 1) || !pdi_recv(&status, 1)) break;
+    if (!(status & NVM_STATUS_BUSY_bm)) return true;
   }
-  return true;
+
+  return false;
 }
 
 
-bool nvm_read (uint32_t addr, char *buf, uint32_t len)
-{
-  uint32_t rpt = len -1;
-  char cmds[] = {
-    ST | PTR | SZ_4,
-    (addr      ) & 0xff,
-    (addr >>  8) & 0xff,
-    (addr >> 16) & 0xff,
-    (addr >> 24) & 0xff,
-
-    REPEAT | SZ_4,
-    (rpt      ) & 0xff,
-    (rpt >>  8) & 0xff,
-    (rpt >> 16) & 0xff,
-    (rpt >> 24) & 0xff,
-
-    LD | xPTRpp | SZ_1
-  };
-
-  return
-    nvm_controller_busy_wait () &&
-    nvm_loadcmd (NVM_READ) &&
-    pdi_sendrecv (cmds, sizeof (cmds), buf, len);
+static bool _is_enabled() {
+  uint8_t status = 0;
+  if (!_ldcs(PDI_REG_STATUS, &status)) return false;
+  return status & PDI_NVMEN_bm;
 }
 
 
-bool nvm_rewrite_page (uint32_t addr, const char *buf, uint16_t len)
-{
-  if (len > PAGE_SIZE)
-    return false;
+static bool _wait_enabled() {
+  for (int i = 0; i < WAIT_ATTEMPTS; i++)
+    if (_is_enabled()) return true;
 
-  if (!nvm_controller_busy_wait () ||
-      !nvm_loadcmd (NVM_ERASE_PAGE_BUF) ||
-      !nvm_cmdex ())
-    return false;
-
-  if (!nvm_controller_busy_wait () ||
-      !nvm_loadcmd (NVM_LOAD_PAGE_BUF))
-    return false;
-
-  // I would guess only the lower PAGE_SIZE part of the address is relevant
-  // while writing to the page buffer, but the application note is very unclear
-  uint16_t rpt = len -1;
-  char buf_cmds[] = {
-    ST | PTR | SZ_4,
-    (addr      ) & 0xff,
-    (addr >>  8) & 0xff,
-    (addr >> 16) & 0xff,
-    (addr >> 24) & 0xff,
-
-    REPEAT | SZ_2,
-    (rpt     ) & 0xff,
-    (rpt >> 8) & 0xff,
-
-    ST | xPTRpp | SZ_1
-  };
-  if (!pdi_send (buf_cmds, sizeof (buf_cmds)) || !pdi_send (buf, len))
-    return false;
-
-  char page_cmds[] = {
-    ST | PTR | SZ_4,
-    (addr      ) & 0xff,
-    (addr >>  8) & 0xff,
-    (addr >> 16) & 0xff,
-    (addr >> 24) & 0xff,
-    ST | xPTRpp | SZ_1, // dummy write to trigger erase+program from page buf
-    0
-  };
-
-  return
-    nvm_loadcmd (NVM_ERASE_WRITE_FLASH_PAGE) &&
-    pdi_send (page_cmds, sizeof (page_cmds)) &&
-    nvm_controller_busy_wait ();
+  return false;
 }
 
 
-bool nvm_chip_erase (void)
-{
+static bool _exec(uint8_t cmd) {
   return
-    nvm_controller_busy_wait () &&
-    nvm_loadcmd (NVM_CHIP_ERASE) &&
-    nvm_cmdex () &&
-    nvm_wait_enabled () &&
-    nvm_controller_busy_wait ();
+    _wait_enabled()  &&
+    _wait_busy()     &&
+    nvm_command(cmd) &&
+    nvm_execute()    &&
+    _wait_enabled()  &&
+    _wait_busy();
+}
+
+
+static bool _read(uint32_t addr, uint8_t *buf, uint32_t len) {
+  uint8_t cmd = LD | xPTRpp | SZ_1;
+
+  return
+    _wait_enabled()        &&
+    _wait_busy()           &&
+    nvm_command(NVM_READ)  &&
+    _store_address(addr)   &&
+    _store_repeat(len - 1) &&
+    pdi_send(&cmd, 1)      &&
+    pdi_recv(buf, len);
+}
+
+
+bool nvm_read(uint32_t addr, uint8_t *buf, uint32_t len) {
+  _RETRY_LOOP(_read(addr, buf, len));
+}
+
+
+int32_t nvm_read_device_id() {
+  pdi_open();
+
+  uint8_t buf[3] = {0};
+
+  if (nvm_read(DEVICE_ID_ADDR, buf, sizeof(buf)))
+    return buf[0] << 16 | buf[1] << 8 | buf[2];
+
+  return -1;
+}
+
+
+static bool _write_page(uint8_t erase_page_buf_cmd, uint8_t load_page_buf_cmd,
+                        uint8_t write_erase_cmd, uint32_t addr,
+                        const uint8_t *buf, uint16_t len) {
+  uint8_t write[] = {ST | xPTRpp | SZ_1};
+  uint8_t dummy[] = {ST | xPTRpp | SZ_1, 0}; // trigger erase+program
+
+  return
+    _exec(erase_page_buf_cmd)      &&
+    nvm_command(load_page_buf_cmd) &&
+    _store_address(addr)           &&
+    _store_repeat(len - 1)         &&
+    pdi_send(write, sizeof(write)) &&
+    pdi_send(buf, len)             &&
+    nvm_command(write_erase_cmd)   &&
+    _store_address(addr)           &&
+    pdi_send(dummy, sizeof(dummy)) &&
+    _wait_busy();
+}
+
+
+static bool _write_eeprom_page(uint32_t addr, const uint8_t *buf,
+                               uint16_t len) {
+  return _write_page(NVM_ERASE_EEPROM_PAGE_BUF, NVM_LOAD_EEPROM_PAGE_BUF,
+                     NVM_ERASE_WRITE_EEPROM_PAGE, addr, buf, len);
+}
+
+static bool _write_flash_page(uint8_t write_erase_cmd, uint32_t addr,
+                              const uint8_t *buf, uint16_t len) {
+  return _write_page(NVM_ERASE_PAGE_BUF, NVM_LOAD_PAGE_BUF, write_erase_cmd,
+                     addr, buf, len);
+}
+
+
+bool nvm_write_page(nvm_t type, uint32_t addr, const uint8_t *buf,
+                    uint16_t len) {
+  uint8_t cmd = 0;
+
+  switch (type) {
+  case NVM_FLASH:       cmd = NVM_ERASE_WRITE_FLASH_PAGE;        break;
+  case NVM_APPLICATION: cmd = NVM_ERASE_WRITE_APP_SECTION_PAGE;  break;
+  case NVM_BOOT:        cmd = NVM_ERASE_WRITE_BOOT_SECTION_PAGE; break;
+  case NVM_EEPROM:      _RETRY_LOOP(_write_eeprom_page(addr, buf, len));
+  case NVM_SIGNATURE:
+    if (!nvm_erase_page(type, addr)) return false;
+    cmd = NVM_WRITE_USERSIG_ROW;
+    break;
+  case NVM_FUSE:
+  case NVM_NONE: break;
+  }
+
+  if (!cmd) return false;
+
+  _RETRY_LOOP(_write_flash_page(cmd, addr, buf, len));
+}
+
+
+static bool _erase_page(uint8_t cmd, uint32_t addr) {
+  uint8_t dummy[] = {ST | xPTRpp | SZ_1, 0}; // trigger erase+program
+
+  return
+    _wait_enabled()                &&
+    _wait_busy()                   &&
+    nvm_command(cmd)               &&
+    _store_address(addr)           &&
+    pdi_send(dummy, sizeof(dummy)) &&
+    _wait_busy();
+}
+
+
+bool nvm_erase_page(nvm_t type, uint32_t addr) {
+  uint8_t cmd = 0;
+
+  switch (type) {
+  case NVM_FLASH:       cmd = NVM_ERASE_FLASH_PAGE;        break;
+  case NVM_APPLICATION: cmd = NVM_ERASE_APP_SECTION_PAGE;  break;
+  case NVM_BOOT:        cmd = NVM_ERASE_BOOT_SECTION_PAGE; break;
+  case NVM_EEPROM:      cmd = NVM_ERASE_EEPROM_PAGE;       break;
+  case NVM_SIGNATURE:   cmd = NVM_ERASE_USERSIG_ROW;       break;
+  case NVM_FUSE:
+  case NVM_NONE: break;
+  }
+
+  if (!cmd) return false;
+
+  _RETRY_LOOP(_erase_page(cmd, addr));
+}
+
+
+bool nvm_chip_erase() {_RETRY_LOOP(_exec(NVM_CHIP_ERASE));}
+
+
+static bool _write_fuse(uint8_t num, uint8_t value) {
+  return
+    _wait_enabled()                          &&
+    _wait_busy()                             &&
+    nvm_command(NVM_WRITE_FUSE)              &&
+    _store_byte(FUSE_BASE_ADDR + num, value) &&
+    _wait_busy();
+}
+
+
+bool nvm_write_fuse(uint8_t num, uint8_t value) {
+  _RETRY_LOOP(_write_fuse(num, value));
+}
+
+
+static bool _crc(uint8_t *crc) {
+  uint8_t cmd = NVM_FLASH_CRC;
+  uint32_t addr = NVM_REG_BASE + NVM_REG_DATA_OFFS;
+
+  return
+    _wait_enabled()      &&
+    _wait_busy()         &&
+    nvm_command(cmd)     &&
+    nvm_execute()        &&
+    _wait_enabled()      &&
+    _wait_busy()         &&
+    _load_u24(addr, crc);
+}
+
+
+static bool _crc_loop(uint8_t *crc) {_RETRY_LOOP(_crc(crc));}
+
+
+int32_t nvm_flash_crc() {
+  // Note, only NVM_FLASH_CRC seems to work. NVM_FLASH_RANGE_CRC,
+  // NVM_APP_SECTION_CRC and NVM_BOOT_SECTION_CRC return inconsistent values
+  // at least on the xmega192a3u.
+
+  uint8_t crc[3] = {0};
+  if (!_crc_loop(crc)) return -1;
+  return crc[2] << 16 | crc[1] << 8 | crc[0];
 }
