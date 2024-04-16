@@ -20,22 +20,41 @@
 #include <sys/mman.h>
 #include <string.h>
 
+#ifdef RPI4
+//BCM2711
+#define BCM_ST_BASE    0x3000
+#define BCM_GPIO_BASE  0x200000
 
-#define BCM2835_ST_BASE    0x3000
-#define BCM2835_GPIO_BASE  0x200000
+#define BCM_GPFSEL0    0x00
+#define BCM_GPSET0     0x1c
+#define BCM_GPCLR0     0x28
+#define BCM_GPLEV0     0x34
 
-#define BCM2835_GPFSEL0    0x00
-#define BCM2835_GPSET0     0x1c
-#define BCM2835_GPCLR0     0x28
-#define BCM2835_GPLEV0     0x34
+#define BCM_GPIO_FSEL_INPT 0
+#define BCM_GPIO_FSEL_OUTP 1
+#define BCM_GPIO_FSEL_MASK 7
 
-#define BCM2835_GPIO_FSEL_INPT 0
-#define BCM2835_GPIO_FSEL_OUTP 1
-#define BCM2835_GPIO_FSEL_MASK 7
+#define BCM_ST_CLO 4
+#define BCM_ST_CHI 8
 
-#define BCM2835_ST_CLO 4
-#define BCM2835_ST_CHI 8
+#else
+//BCM2835
+#define BCM_ST_BASE    0x3000
+#define BCM_GPIO_BASE  0x200000
 
+#define BCM_GPFSEL0    0x00
+#define BCM_GPSET0     0x1c
+#define BCM_GPCLR0     0x28
+#define BCM_GPLEV0     0x34
+
+#define BCM_GPIO_FSEL_INPT 0
+#define BCM_GPIO_FSEL_OUTP 1
+#define BCM_GPIO_FSEL_MASK 7
+
+#define BCM_ST_CLO 4
+#define BCM_ST_CHI 8
+
+#endif
 
 volatile uint32_t *_gpio = 0;
 volatile uint32_t *_st   = 0;
@@ -43,9 +62,9 @@ volatile uint32_t *_st   = 0;
 
 static void _gpio_fsel(uint8_t pin, uint8_t mode) {
   // Function selects are 10 pins per 32 bit word, 3 bits per pin
-  volatile uint32_t *paddr = _gpio + BCM2835_GPFSEL0 / 4 + (pin / 10);
+  volatile uint32_t *paddr = _gpio + BCM_GPFSEL0 / 4 + (pin / 10);
   uint8_t  shift = (pin % 10) * 3;
-  uint32_t mask  = BCM2835_GPIO_FSEL_MASK << shift;
+  uint32_t mask  = BCM_GPIO_FSEL_MASK << shift;
   uint32_t value = mode << shift;
 
   *paddr = (*paddr & ~mask) | (value & mask);
@@ -53,33 +72,33 @@ static void _gpio_fsel(uint8_t pin, uint8_t mode) {
 
 
 void rpi_gpio_dir(uint8_t pin, bool in) {
-  _gpio_fsel(pin, in ? BCM2835_GPIO_FSEL_INPT : BCM2835_GPIO_FSEL_OUTP);
+  _gpio_fsel(pin, in ? BCM_GPIO_FSEL_INPT : BCM_GPIO_FSEL_OUTP);
 }
 
 
 void rpi_gpio_set(uint8_t pin) {
-  volatile uint32_t *paddr = _gpio + BCM2835_GPSET0 / 4 + pin / 32;
+  volatile uint32_t *paddr = _gpio + BCM_GPSET0 / 4 + pin / 32;
   *paddr = 1 << (pin % 32);
 }
 
 
 void rpi_gpio_clr(uint8_t pin) {
-  volatile uint32_t *paddr = _gpio + BCM2835_GPCLR0 / 4 + pin / 32;
+  volatile uint32_t *paddr = _gpio + BCM_GPCLR0 / 4 + pin / 32;
   *paddr = 1 << (pin % 32);
 }
 
 
 bool rpi_gpio_get(uint8_t pin) {
-  volatile uint32_t *paddr = _gpio + BCM2835_GPLEV0 / 4 + pin / 32;
+  volatile uint32_t *paddr = _gpio + BCM_GPLEV0 / 4 + pin / 32;
   return *paddr & (1 << (pin % 32));
 }
 
 
 // Read the System Timer Counter (64-bits)
 static uint64_t _st_read() {
-  uint32_t hi = *(volatile uint32_t *)(_st + BCM2835_ST_CHI / 4);
-  uint32_t lo = *(volatile uint32_t *)(_st + BCM2835_ST_CLO / 4);
-  uint64_t st = *(volatile uint32_t *)(_st + BCM2835_ST_CHI / 4);
+  uint32_t hi = *(volatile uint32_t *)(_st + BCM_ST_CHI / 4);
+  uint32_t lo = *(volatile uint32_t *)(_st + BCM_ST_CLO / 4);
+  uint64_t st = *(volatile uint32_t *)(_st + BCM_ST_CHI / 4);
 
   // Test for overflow
   if (st == hi) {
@@ -88,7 +107,7 @@ static uint64_t _st_read() {
 
   } else {
     st <<= 32;
-    st += *(volatile uint32_t *)(_st + BCM2835_ST_CLO / 4);
+    st += *(volatile uint32_t *)(_st + BCM_ST_CLO / 4);
   }
 
   return st;
@@ -121,14 +140,13 @@ bool rpi_init() {
   off_t base;
   size_t size;
   if (8 <= ret) {
+    #ifdef RPI4
+    base = buf[8]  << 24 | buf[9]  << 16 | buf[10] << 8 | buf[11];
+    size = buf[12] << 24 | buf[13] << 16 | buf[14] << 8 | buf[15];
+    #else
     base = buf[4] << 24 | buf[5] << 16 | buf[6]  << 8 | buf[7];
     size = buf[8] << 24 | buf[9] << 16 | buf[10] << 8 | buf[11];
-
-    if (!base) { // RPI 4
-      base = buf[8]  << 24 | buf[9]  << 16 | buf[10] << 8 | buf[11];
-      size = buf[12] << 24 | buf[13] << 16 | buf[14] << 8 | buf[15];
-    }
-
+    #endif
   } else return error("Unable to read device tree");
 
   // Open /dev/mem
@@ -141,8 +159,8 @@ bool rpi_init() {
   if (mem == MAP_FAILED) return error("Failed to map memory");
 
   // Save base addresses.  Divided by 4 for (uint32_t *) access.
-  _gpio = mem + BCM2835_GPIO_BASE / 4;
-  _st   = mem + BCM2835_ST_BASE   / 4;
+  _gpio = mem + BCM_GPIO_BASE / 4;
+  _st   = mem + BCM_ST_BASE   / 4;
 
   return true;
 }

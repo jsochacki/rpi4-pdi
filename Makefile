@@ -5,7 +5,7 @@ OBJ := $(patsubst src/%.cc,build/%.o,$(OBJ))
 
 CFLAGS += -MD -MP -MT $@ -MF build/dep/$(@F).d
 CFLAGS += -O3 -g -Wall -Werror -Isrc -std=c99
-CFLAGS += -D_POSIX_C_SOURCE=200112L -D_XOPEN_SOURCE=500
+CFLAGS += -D_POSIX_C_SOURCE=200112L -D_XOPEN_SOURCE=500 -DRPI4
 
 all: $(TARGET)
 
